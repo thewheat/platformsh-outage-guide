@@ -1,6 +1,8 @@
 # Platform.sh Debugging Outages and Performance Issues
 
-## Prerequistes
+- A guide on how to investigate and debug outages and performance issues on https://platform.sh/
+
+## Prerequisites
 
 - Understand your setup
     - Any CDNs (e.g. Fastly / Cloudflare) in from of the Platform.sh origin
