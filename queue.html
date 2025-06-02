@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Queue Processing Visualization</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    h1,h2,h3,h4,h5 { margin: 0 }
+    .control-section { border: 1px solid darkgray; background-color: #efefef; padding: 0.5em; margin: 0.5em 0; border-radius: 1em;;}
+    .control-section h3, .control-section h4 { margin-bottom: 0.5em; }
+    .control-section h5 { margin-top: 0.2em; }
+    label { display: inline; margin-right: 5em; }
+    label.nomargin { margin-right: 0 }
+    input { width: 5em; }
+
+    .control-section ul { margin: 0.5em 0; padding: 0 1em;}
+    .visualization { display: flex; gap: 20px; flex-wrap: wrap;}
+    .visualization .box { border: 2px solid #333; padding: 10px; width: 300px; min-height: 20px; overflow-x: auto; }
+    .queue-box      { background: #f9f9f9; }
+    .processing-box { background: #eef; }
+    
+    .item { width: 10px; height: 10px; margin: 2px; border-radius: 2px; flex-shrink: 0; }
+    .static-item { background: #48a; }
+    .dynamic-item { background: #f66; }
+
+    .inline-block {
+      display: inline-block
+    }
+
+  </style>
+</head>
+<body>
+  <h1>nginx <code>worker_connections</code> and PHP <code>max_children</code> worker queue visualization</h1>
+  <ul>
+    <li>nginx has <a href="https://nginx.org/en/docs/ngx_core_module.html#worker_processes"><code>worker_processes</code></a> each with its own <a href="https://nginx.org/en/docs/ngx_core_module.html#worker_connections"><code>worker_connections</code></a> to processes incoming requests</li>
+    <li>PHP is configured with <a href="https://www.php.net/manual/en/install.fpm.configuration.php#pm.max-children"><code>max_children</code></a> workers to process dynamic PHP requests</li>
+    <li><div class="item static-item inline-block"></div>Static requests are processed by nginx worker connections directly</li>
+    <li><div class="item dynamic-item inline-block"></div>Dynamic requests are processed by a nginx worker connection calling a PHP worker</li>
+    <li>Max of simultaenous nginx requests / connections = <code>worker_processes</code> x <code>worker_connections</code></li>
+    <li>Max of simultaenous PHP requests = <code>max_children</code></li>
+    <li>When all PHP workers are in use, the nginx connection will wait until there is a free PHP worker available</li>
+    <li>If current requests exceed total number of <code>worker_connections</code>, nginx will give a "worker_connections are not enough" error message</li>
+  </ul>
+  <div class="control-section">
+    <h3>Worker / Connection counts</h3>
+    <ul>
+      <li>For simplicity we'll treat <code>worker_processes</code> = <code>1</code></li>
+    </ul>
+    <div class="controls">
+      <label>Nginx worker connections: <input id="nginxWorkers" type="number" value="20" min="1"></label>
+      <label>PHP workers: <input id="phpWorkers" type="number" value="5" min="1"></label>
+    </div>
+  </div>
+
+  <div class="control-section">
+    <h3>Traffic details</h3>
+    <div class="controls">
+      <label># requests/sec: <input id="arrivalRate" type="number" value="10" min="0"></label>
+      <label class="nomargin"><div class="item static-item inline-block"></div>Static:<div class="item dynamic-item inline-block"></div>Dynamic ratio:</label> <input id="ratioStatic" type="number" value="4" min="0" placeholder="static"><span>:</span><input id="ratioDynamic" type="number" value="1" min="0" placeholder="dynamic"></div>
+      <div class="control-section">
+        <h4>Processing time (in ms)</h4>
+        <ul>
+          <li>Duration the request takes to process</li>
+        </ul>
+        <h5><div class="item static-item inline-block"></div>Static Requests</h5>
+        <div class="controls">
+          <label class="nomargin">Minumum: <input id="staticMin" type="number" value="500" min="0"></label>
+          <label>Maximum: <input id="staticMax" type="number" value="2000" min="0"></label>
+        </div>
+        <h5><div class="item dynamic-item inline-block"></div>Dynamic Requests</h5>
+        <div class="controls">
+          <label class="nomargin">Minumum: <input id="dynMin" type="number" value="5000" min="0"></label>
+          <label>Maximum: <input id="dynMax" type="number" value="10000" min="0"></label>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <button id="resetBtn">Reset</button>
+
+  <h3>Nginx workers connections</h3>
+  <div class="visualization">
+    <div>
+      <strong>Currently processing:</strong> <span id="statTotalProc">0</span>
+      <div id="totalProcessing" class="box" style="display:flex;"></div>
+    </div>
+    <div>
+      <strong>Waiting for free PHP workers:</strong> <span id="statTotalWaiting">0</span>
+      <div id="totalWaiting" class="box" style="display:flex;"></div>
+    </div>
+  </div>
+  <h3>Incoming traffic backlog</h3>
+  <div class="visualization">
+    <div>
+      <strong>Queue count:</strong> <span id="statTotalIn">0</span> (if greater than 0, "worker_connections are not enough" error will occur)
+      <div id="totalQueue" class="box" style="display:flex;"></div>
+    </div>
+  </div>
+
+  <script>
+    // Controls
+    const nginxInput = document.getElementById('nginxWorkers');
+    const phpInput   = document.getElementById('phpWorkers');
+    const arrivalInput = document.getElementById('arrivalRate');
+    const ratioStatic = document.getElementById('ratioStatic');
+    const ratioDynamic= document.getElementById('ratioDynamic');
+    const staticMin   = document.getElementById('staticMin');
+    const staticMax   = document.getElementById('staticMax');
+    const dynMin      = document.getElementById('dynMin');
+    const dynMax      = document.getElementById('dynMax');
+    const resetBtn    = document.getElementById('resetBtn');
+
+    // Elements
+    const totalQueueEl       = document.getElementById('totalQueue');
+    const totalWaitEl        = document.getElementById('totalWaiting');
+    const totalProcEl        = document.getElementById('totalProcessing');
+    const statTotalInEl      = document.getElementById('statTotalIn');
+    const statTotalWaitEl    = document.getElementById('statTotalWaiting');
+    const statTotalProcEl    = document.getElementById('statTotalProc');
+
+    // State
+    let totalQueue  = [];
+    let totalWaitingQueue = [];
+    let totalProcessing   = 0;
+    let totalProcessingDyn   = 0;
+    let totalWaiting = 0;
+    let arrivalTimer;
+
+    function updateStats() {
+      statTotalInEl.textContent    = totalQueue.length;
+      statTotalProcEl.textContent  = totalProcessing;
+      statTotalWaitEl.textContent  = totalWaiting;
+    }
+
+    function randomTime(min, max) {
+      return Math.random() * (max - min) + min;
+    }
+
+    function enqueueRequest() {
+      const sRatio = parseFloat(ratioStatic.value) || 0;
+      const dRatio = parseFloat(ratioDynamic.value)|| 0;
+      const total  = sRatio + dRatio;
+      const pick = total>0 ? Math.random()*total : 0;
+      const isStatic = pick < sRatio;
+      const elt = document.createElement('div');
+      if (isStatic) {
+        elt.className='item static-item';
+      } else {
+        elt.className='item dynamic-item';
+      }
+      totalQueue.push(elt); totalQueueEl.appendChild(elt);
+      processQueues(); 
+      updateStats();
+    }
+
+    function processQueues() {
+      const nPHP    = parseInt(phpInput.value,10);
+      const nNginx = parseInt(nginxInput.value,10);
+      const nStatic = nNginx - nPHP;
+
+      while(totalWaiting + totalProcessing < nNginx && totalQueue.length>0) {
+        const el = totalQueue.shift(); totalQueueEl.removeChild(el);
+
+        let t;
+        let wait;
+        let isDyn = el.classList.contains("dynamic-item");
+        if (isDyn){
+          t = randomTime(parseFloat(dynMin.value), parseFloat(dynMax.value));
+          if(totalProcessingDyn < nPHP) {
+            wait = false;
+            totalProcessingDyn++;
+          }
+          else {
+            wait = true;
+          }
+        }
+        else {
+          t = randomTime(parseFloat(staticMin.value), parseFloat(staticMax.value));
+          wait = false;
+        }
+
+        if(wait){
+          totalWaiting++;
+          totalWaitEl.appendChild(el);
+          setTimeout(() => {
+              totalWaitEl.removeChild(el);
+              totalWaiting--; updateStats(); processQueues();
+          }, t);
+        }
+        else {
+          totalProcessing++;
+          totalProcEl.appendChild(el);
+          setTimeout(() => {
+              totalProcEl.removeChild(el);
+              if (isDyn)
+                totalProcessingDyn--;
+              totalProcessing--; updateStats(); processQueues();
+          }, t);
+        }
+
+      }
+    }
+
+    function startArrival() {
+      clearInterval(arrivalTimer);
+      const rate = parseFloat(arrivalInput.value);
+      if (rate > 0) {
+        arrivalTimer = setInterval(enqueueRequest, 1000 / rate);
+      }
+    }
+
+    resetBtn.addEventListener('click', () => {
+      clearInterval(arrivalTimer);
+      totalQueue = [];
+      totalQueueEl.innerHTML='';
+      totalWaitEl.innerHTML='';
+      totalProcEl.innerHTML='';
+
+      totalWaitingQueue = [];
+      totalProcessing = 0;
+      totalProcessingDyn = 0;
+      totalWaiting = 0;
+      updateStats(); startArrival();
+    });
+
+    inputs = [nginxInput, phpInput, arrivalInput, ratioStatic, ratioDynamic,
+    staticMin, staticMax, dynMin, dynMax]
+    inputs.forEach(inp => inp.addEventListener('change', ()=>{
+       updateStats(); startArrival(); // processQueues(); 
+    }));
+    inputs.forEach(inp => inp.addEventListener('keyup', ()=>{
+       updateStats(); startArrival(); // processQueues(); 
+    }));
+
+    // init
+    updateStats(); startArrival();
+  </script>
+</body>
+</html>
